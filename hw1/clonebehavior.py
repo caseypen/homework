@@ -38,20 +38,23 @@ class CloneBehavior(object):
 
         # Actor Network
         self.sy_ob_no = tf.placeholder(shape=[None, self.ob_dim], name="ob", dtype=tf.float32)
+        self.batch_size = tf.shape(self.sy_ob_no)[0]
         self.sy_agent_pi = self.create_actor_network()
         self.sy_expert_pi = tf.placeholder(shape=[None, self.ac_dim], name="expert_pi", dtype=tf.float32)
 
-        self.loss = 0.5*tf.nn.l2_loss(self.sy_agent_pi - self.sy_expert_pi)
+        # self.loss = 0.5*tf.nn.l2_loss(self.sy_agent_pi - self.sy_expert_pi)
+        self.loss = tf.reduce_mean(tf.square(self.sy_agent_pi - self.sy_expert_pi))
+        # self.loss = tflearn.mean_square(self.sy_agent_pi, self.sy_expert_pi)
         self.trainer = tf.train.RMSPropOptimizer(self.lr).minimize(self.loss)
 
     def create_actor_network(self):
-        # h_1 = tf.layers.dense(self.sy_ob_no,128,activation=None,name="hidden_layer_1")
-        # h_2 = tf.layers.dense(h_1,64,activation=None,name="hidden_layer_2")
-        # h_3 = tf.layers.dense(h_2,64,activation=tf.nn.relu,name="hidden_layer_3")
-        # logits_na = tf.layers.dense(h_3,self.ac_dim,activation=None,name="logits")
-        # return logits_na
-        net = tflearn.fully_connected(self.sy_ob_no, 64)
-        net = tflearn.layers.normalization.batch_normalization(net)
+        h_1 = tf.layers.dense(self.sy_ob_no,128,activation=None,name="hidden_layer_1")
+        h_2 = tf.layers.dense(h_1,64,activation=None,name="hidden_layer_2")
+        h_3 = tf.layers.dense(h_2,64,activation=tf.nn.relu,name="hidden_layer_3")
+        logits_na = tf.layers.dense(h_3,self.ac_dim,activation=None,name="logits")
+        return logits_na
+        # net = tflearn.fully_connected(self.sy_ob_no, 128, activation=None)
+        # net = tflearn.layers.normalization.batch_normalization(net)
         # # action = tflearn.input_data(shape=[None,self.a_dim]) # not take in action when calculating Q 
         # net = tflearn.conv_2d(inputs, 8, 3, activation='relu', name='conv1') # inputs must be 4D tensor
         # # net = tflearn.conv_2d(net, 16, 3, activation='relu', name='conv2')
@@ -64,14 +67,15 @@ class CloneBehavior(object):
         # # t2 = tflearn.fully_connected(action, 64)
 
         # # net = tflearn.activation(tf.matmul(net,t1.W) + tf.matmul(action, t2.W) + t2.b, activation='relu')
-        net = tflearn.fully_connected(net, 32, activation='relu')
-        net = tflearn.layers.normalization.batch_normalization(net)
-
+        # net = tflearn.fully_connected(net, 64, activation='relu')
+        # net = tflearn.layers.normalization.batch_normalization(net)
+        # net = tflearn.fully_connected(net, 32, activation='relu')
+        # net = tflearn.layers.normalization.batch_normalization(net)
         # linear layer connected to 1 output representing Q(s,a) 
         # Weights are init to Uniform[-3e-3, 3e-3]
         # w_init = tflearn.initializations.uniform(minval=-0.003, maxval=0.003)
-        out = tflearn.fully_connected(net, self.ac_dim)
-        return out
+        # out = tflearn.fully_connected(net, self.ac_dim)
+        # return out
 
     def train(self, ob_no, expert_pi):
         return self.sess.run([self.trainer, self.loss], feed_dict={
@@ -87,22 +91,31 @@ class CloneBehavior(object):
 
 def train(cb_agent, sess, observations, actions):
     cb_agent.train(observations,actions)
-def test(cb_agent, env, i, batch_size):
-    obs = env.reset()
-    done = False
-    totalr = 0.
-    steps = 0
-    max_steps = env.spec.timestep_limit
-    while not done or steps < max_steps:
-        action = cb_agent.predict(obs[None])
-        obs, r, done, _ = env.step(action)
-        totalr += r
-        steps += 1
-        env.render()
-        # if steps % 100 == 0: print("%i/%i"%(steps, max_steps))
-        # if steps >= batch_size:
-            # break
-    print('iter ',i,' testing total reward',totalr)
+def test(cb_agent, env, render):
+    returns = []
+    for i in range(20):
+        print('iter', i)
+        obs = env.reset()
+        done = False
+        totalr = 0.
+        steps = 0
+        while not done:
+            action = cb_agent.predict(obs[None])
+            obs, r, done, _ = env.step(action)
+            totalr += r
+            steps += 1
+            if render:
+                env.render()
+            # if steps % 100 == 0: print("%i/%i"%(steps, max_steps))
+            if steps >= max_steps:
+            # if steps >= 2000:
+                break
+        returns.append(totalr)
+
+    print('returns', returns)
+    print('mean return', np.mean(returns))
+    print('std of return', np.std(returns))
+
 
 def main():
     import argparse
@@ -120,6 +133,7 @@ def main():
     Dagger = args.Dagger
     learning_rate = args.learning_rate
     batch_size = args.batch_size
+    render = args.render
     print('loading and building expert policy')
     policy_fn = load_policy.load_policy(args.expert_policy_file)
     print('loaded and built')
@@ -135,67 +149,58 @@ def main():
             sess.run(tf.global_variables_initializer())
             # tf_util.initialize()
             max_steps = args.max_timesteps or env.spec.timestep_limit
-            if Dagger:
-                print("Using Dagger!")
+            # train from imitating learning without dagger
             paths = []
+            path = {"obs":np.load("./expert_obs.npy"),
+                    "acts":np.load("./expert_actions.npy")}
+            print("expert obs data loaded: ", path['obs'].shape)
+            print("expert act data loaded: ", path['acts'].shape)
+            paths.append(path)
+            # aggregate with Dagger
+            if Dagger:
+                print("Using Dagger to improve!")
             for i in range(args.num_rollouts):
-                print("********** Iteration %i ************"%i)   
-                totalr = 0
-                steps = 0 # keep batch size
-                loss_mean=0
-                while True:    
-                    observations, expert_actions, returns, path = [], [], [], []
+                print("********** Iteration %i ************"%i) 
+                np.random.seed(i)  
+                # training with expert exploration
+                ob_no =  np.concatenate([path["obs"] for path in paths])
+                ac_no = np.concatenate([path["acts"] for path in paths])
+                data_size = ob_no.shape[0]
+                print data_size
+                for j in range(500):
+                    batch_idx = np.random.randint(data_size, size = batch_size)
+                    batch_ob = ob_no[batch_idx,:]
+                    batch_ac = ac_no[batch_idx,:]
+                    _,loss = cb_agent.train(batch_ob,batch_ac)
+                print('loss', loss)
+                
+                # Dagger to improve with expert label
+                for k in range(20):
+                    # print(" ## Rollout %i"%k)
                     obs = env.reset()
                     done = False
-                    while not done or steps < max_steps:
+                    totalr = 0
+                    steps = 0 # keep batch size
+                    loss_mean=0
+                    observations, expert_actions, returns, path = [], [], [], []
+                    while not done:
                         expert_action = policy_fn(obs[None])
                         agent_action = cb_agent.predict(obs[None])
                         observations.append(obs)
                         expert_actions.append(expert_action[0])
                         if Dagger:
                             obs, r, done, _ = env.step(agent_action)
-                        else:
-                            obs, r, done, _ = env.step(expert_action)
                         totalr += r
                         steps += 1
                         if args.render:
                             env.render()
-                        # if steps % 100 == 0: print("%i/%i"%(steps, max_steps))
-                        # if steps >= max_steps:
-                        #     break    
                     returns.append(totalr) # return in an episode
                     path = {"obs":np.array(observations),
                             "acts":np.array(expert_actions)}
+                    # print path["obs"].shape
+                    # print path["acts"].shape
                     paths.append(path)
-                    if steps >= args.batch_size:
-                        ob_no =  np.concatenate([path["obs"] for path in paths])
-                        ac_no = np.concatenate([path["acts"] for path in paths])
-                        data_size = ob_no.shape[0]
-                        print data_size
-                        for j in range(200):
-                            batch_idx = np.random.randint(data_size, size = batch_size)
-                            batch_ob = ob_no[batch_idx,:]
-                            batch_ac = ac_no[batch_idx,:]
-                            _,loss = cb_agent.train(batch_ob,batch_ac)
-                            loss_mean += loss
-                            if j%10==0: 
-                                print('loss',loss)
-                        loss_mean/=200
-                        print('loss_mean', loss_mean)
-                        print('mean return', np.mean(returns))
-                        # print('std of return', np.std(returns))
-                        if not Dagger:
-                        # if True:
-                            test(cb_agent, env, i)
-                        # print('batch_size: %i'%(steps))
-                        break
-                # sess.run()
-                # print('returns', returns)
-                # test(cb_agent, env, i, batch_size)
-                # if Dagger:
-                if False:
-                    print('mean return', np.mean(returns))
-                    print('std of return', np.std(returns))
-            test(cb_agent, env, i, batch_size)
+                print('mean return', np.mean(returns))
+            # test(cb_agent, env, i, batch_size)
 if __name__ == '__main__':
     main()

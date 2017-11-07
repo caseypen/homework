@@ -49,8 +49,9 @@ def main():
             steps = 0
             while not done:
                 action = policy_fn(obs[None,:])
+                # print action
                 observations.append(obs)
-                actions.append(action)
+                actions.append(action[0])
                 obs, r, done, _ = env.step(action)
                 totalr += r
                 steps += 1
@@ -67,6 +68,9 @@ def main():
 
         expert_data = {'observations': np.array(observations),
                        'actions': np.array(actions)}
-
+        # keep the training data
+        np.save("./expert_actions", expert_data['actions'])
+        np.save("./expert_obs",expert_data['observations'])
+        print("Training files saved!")
 if __name__ == '__main__':
     main()
