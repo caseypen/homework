@@ -23,13 +23,48 @@ def sample(env,
         Each path can have elements for observations, next_observations, rewards, returns, actions, etc.
     """
     paths = []
+    max_path_length = horizon or env.spec.max_episode_steps
+    gamma = 0.99 
     """ YOUR CODE HERE """
-
+    for itr in range(num_paths):
+        print("********** Iteration %i ************"%itr)
+        ob = env.reset()
+        obs, acs, rewards, obs_2, returns = [], [], [], [], []
+        animate_this_episode=(len(paths)==0 and (itr % 10 == 0) and render)
+        steps = 0
+        g = 0
+        while True:
+            if animate_this_episode:
+                env.render()
+                time.sleep(0.05)
+            obs.append(ob)
+            ac = controller.get_action(ob)
+            # print ac
+            acs.append(ac)
+            # print ac
+            ob, rew, done, _ = env.step(ac)
+            g += rew*gamma**steps
+            obs_2.append(ob)
+            rewards.append(rew)
+            returns.append(g)
+            steps += 1
+            if done or steps > max_path_length:
+                terminated = done
+                break 
+        path = {"observation" : np.array(obs), 
+                "reward" : np.array(rewards), 
+                "action" : np.array(acs),
+                "obs_next" : np.array(obs_2),
+                "return": np.array(returns)}
+        paths.append(path)
     return paths
 
 # Utility to compute cost a path for a given cost function
 def path_cost(cost_fn, path):
     return trajectory_cost_fn(cost_fn, path['observations'], path['actions'], path['next_observations'])
+
+def pathlength(path):
+    return len(path["reward"])
 
 def compute_normalization(data):
     """
@@ -38,6 +73,18 @@ def compute_normalization(data):
     """
 
     """ YOUR CODE HERE """
+    obs = np.concatenate([path["observation"] for path in data])
+    action = np.concatenate([path["action"] for path in data])
+    next_ob = np.concatenate([path["obs_next"] for path in data])
+
+    deltas = obs - next_ob
+    mean_obs = np.mean(obs)
+    std_obs = np.std(obs)
+    mean_deltas = np.mean(deltas)
+    std_deltas = np.std(deltas)
+    mean_action = np.mean(action)
+    std_action = np.std(action)
+
     return mean_obs, std_obs, mean_deltas, std_deltas, mean_action, std_action
 
 
@@ -58,13 +105,13 @@ def train(env,
          batch_size=512,
          num_paths_random=10, 
          num_paths_onpol=10, 
-         num_simulated_paths=10000,
+         num_simulated_paths=1000,
          env_horizon=1000, 
          mpc_horizon=15,
          n_layers=2,
          size=500,
          activation=tf.nn.relu,
-         output_activation=None
+         output_activation=None,
          ):
 
     """
@@ -112,8 +159,7 @@ def train(env,
     random_controller = RandomController(env)
 
     """ YOUR CODE HERE """
-
-
+    paths_rand = sample(env, random_controller, num_paths=num_paths_random, horizon=env_horizon,render=render,verbose=False)
     #========================================================
     # 
     # The random data will be used to get statistics (mean
@@ -122,8 +168,10 @@ def train(env,
     # for normalizing inputs and denormalizing outputs
     # from the dynamics network. 
     # 
-    normalization = """ YOUR CODE HERE """
+    """ YOUR CODE HERE """
+    normalization = compute_normalization(paths_rand)
 
+    gamma = 0.99
 
     #========================================================
     # 
@@ -161,10 +209,110 @@ def train(env,
     # Take multiple iterations of onpolicy aggregation at each iteration refitting the dynamics model to current dataset and then taking onpolicy samples and aggregating to the dataset. 
     # Note: You don't need to use a mixing ratio in this assignment for new and old data as described in https://arxiv.org/abs/1708.02596
     # 
+        # prefit dynamic before on policy dagger:
+    print("****** Pretrain dynamic Model *******")
+    losses = []
+    obs_rand = np.concatenate([path["observation"] for path in paths_rand])
+    action_rand = np.concatenate([path["action"] for path in paths_rand])
+    next_ob_rand = np.concatenate([path["obs_next"] for path in paths_rand])
+    data_size_rand = obs_rand.shape[0]
+    for i in range(1000):
+        # obtain batch size from random policy
+        batch_idx_rand = np.random.randint(data_size_rand, size = batch_size)
+        batch_ob_rand = obs_rand[batch_idx_rand,:]
+        batch_ac_rand = action_rand[batch_idx_rand,:]
+        batch_nxt_rand = next_ob_rand[batch_idx_rand,:]
+        # obtain batch size from on policy
+        batch_ob = np.copy(batch_ob_rand)
+        batch_ac = np.copy(batch_ac_rand)
+        batch_nxt = np.copy(batch_nxt_rand)
+        loss = dyn_model.fit(batch_ob,batch_ac,batch_nxt)
+        losses.append(loss)
+        if(i%20==0):
+            print('loss', loss)
+
+    costs = []
+    returns = []
+    paths_rl = []
     for itr in range(onpol_iters):
         """ YOUR CODE HERE """
-
-
+        # fit dynamic model
+        if itr > 0:
+            obs_rl = np.concatenate([path["observation"] for path in paths_rl])
+            action_rl = np.concatenate([path["action"] for path in paths_rl])
+            next_ob_rl = np.concatenate([path["obs_next"] for path in paths_rl])
+        obs_rand = np.concatenate([path["observation"] for path in paths_rand])
+        action_rand = np.concatenate([path["action"] for path in paths_rand])
+        next_ob_rand = np.concatenate([path["obs_next"] for path in paths_rand])
+        # print obs[128,:].shape
+        data_size_rand = obs_rand.shape[0]
+        if itr > 0:
+            data_size_rl = obs_rl.shape[0]
+        # batch_size=128
+        losses = []
+        # fit model function
+        for i in range(dynamics_iters):
+            # obtain batch size from random policy
+            batch_idx_rand = np.random.randint(data_size_rand, size = batch_size/20)
+            batch_ob_rand = obs_rand[batch_idx_rand,:]
+            batch_ac_rand = action_rand[batch_idx_rand,:]
+            batch_nxt_rand = next_ob_rand[batch_idx_rand,:]
+            # obtain batch size from on policy
+            if itr > 0:
+                batch_idx_rl   = np.random.randint(data_size_rl, size = batch_size*19/20)
+                batch_ob_rl = obs_rl[batch_idx_rl,:]
+                batch_ac_rl = action_rl[batch_idx_rl,:]
+                batch_nxt_rl = next_ob_rl[batch_idx_rl,:]
+                # mix them
+                batch_ob = np.concatenate((batch_ob_rand,batch_ob_rl))
+                batch_ac = np.concatenate((batch_ac_rand,batch_ac_rl))
+                batch_nxt = np.concatenate((batch_nxt_rand,batch_nxt_rl))
+            else:
+                batch_ob = np.copy(batch_ob_rand)
+                batch_ac = np.copy(batch_ac_rand)
+                batch_nxt = np.copy(batch_nxt_rand)
+            loss = dyn_model.fit(batch_ob,batch_ac,batch_nxt)
+            losses.append(loss)
+            # if(i%20==0):
+            #     print('loss', loss)
+        print("on policy dagger ", itr)
+        ob = env.reset()
+        observes, acs, rewards, obs_2, returns = [], [], [], [], []
+        steps = 0
+        g = 0
+        max_path_length = mpc_controller.horizon
+        timesteps_this_batch=0
+        while True:
+            while True:
+                observes.append(ob)
+                ac = mpc_controller.get_action(ob)
+                # print ac
+                acs.append(ac)
+                # print ac
+                ob, rew, done, _ = env.step(ac)
+                g += rew*gamma**steps
+                obs_2.append(ob)
+                rewards.append(rew)
+                returns.append(g)
+                steps += 1
+                if done or steps > max_path_length:
+                    terminated = done
+                    break 
+            path = {"observation" : np.array(observes), 
+                    "reward" : np.array(rewards), 
+                    "action" : np.array(acs),
+                    "obs_next" : np.array(obs_2),
+                    "return": np.array(returns)}
+            paths_rl.append(path)
+            timesteps_this_batch += pathlength(path)
+            print g
+            if timesteps_this_batch > batch_size:
+                break
+        trajectory_cost = trajectory_cost_fn(cheetah_cost_fn,path["observation"], path["action"],path["obs_next"])
+        costs.append(trajectory_cost)
+        returns.append(path["return"][-1])
+        
+        # print batch_ob.shape
 
         # LOGGING
         # Statistics for performance of MPC policy using
@@ -206,7 +354,7 @@ def main():
     parser.add_argument('--n_layers', '-l', type=int, default=2)
     parser.add_argument('--size', '-s', type=int, default=500)
     # MPC Controller
-    parser.add_argument('--mpc_horizon', '-m', type=int, default=15)
+    parser.add_argument('--mpc_horizon', '-m', type=int, default=10)
     args = parser.parse_args()
 
     # Set seed
